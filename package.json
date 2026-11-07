@@ -1,0 +1,14 @@
+{
+  "name": "security-headers-checker",
+  "version": "0.1.0",
+  "description": "Check a website's HTTP security headers and cookies, get a grade and concrete fixes.",
+  "type": "module",
+  "bin": { "shc": "bin/shc.js" },
+  "files": ["bin", "src"],
+  "engines": { "node": ">=20" },
+  "scripts": { "test": "node --test" },
+  "keywords": ["security", "http-headers", "csp", "hsts", "owasp", "cli"],
+  "author": "Francisco Pereira (https://franciscomanuelpereira.github.io)",
+  "license": "MIT",
+  "repository": { "type": "git", "url": "git+https://github.com/FranciscoManuelPereira/security-headers-checker.git" }
+}
