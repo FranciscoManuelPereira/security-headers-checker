@@ -42,7 +42,7 @@ try {
   const failUnder = values['fail-under'] !== undefined ? Number(values['fail-under']) : undefined;
   if (failUnder !== undefined && result.score < failUnder) process.exit(1);
 } catch (err) {
-  const reason = err.name === 'TimeoutError' ? 'request timed out' : (err.cause?.code ?? err.cause?.errors?.[0]?.code ?? err.message);
+  const reason = err.name === 'TimeoutError' ? 'request timed out' : (err.cause?.code ?? err.cause?.errors?.[0]?.code ?? err.cause?.message ?? err.message);
   process.stderr.write(`Could not scan ${positionals[0]}: ${reason}\n`);
   process.exit(2);
 }
