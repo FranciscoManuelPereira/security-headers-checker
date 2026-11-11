@@ -244,3 +244,155 @@ export function grade(findings) {
   const letter = score >= 90 ? 'A' : score >= 75 ? 'B' : score >= 60 ? 'C' : score >= 45 ? 'D' : score >= 30 ? 'E' : 'F';
   return { score, letter };
 }
+
+// ---------------------------------------------------------------------------
+// Site checks. These need extra requests, which scan.js makes (see probes.js).
+// The functions below stay pure: they take what the probes found.
+// ---------------------------------------------------------------------------
+
+/**
+ * @param {{ error?: string, status?: number, location?: string | null } | null} probe
+ *   Result of requesting the http:// version of the site without following redirects.
+ * @returns {Finding}
+ */
+export function checkHttpsRedirect(probe) {
+  const base = { id: 'https-redirect', title: 'HTTP to HTTPS redirect', max: 10 };
+  const fix = 'Redirect every http:// request to https:// with a 301 or 308.';
+  if (!probe || probe.error) {
+    // Port 80 closed or refusing connections means nobody can be served over plain HTTP.
+    return { ...base, status: 'pass', points: 10, message: `Plain HTTP is not reachable${probe?.error ? ` (${probe.error})` : ''}, so there is nothing to downgrade to.` };
+  }
+  const isRedirect = probe.status >= 300 && probe.status < 400;
+  let target;
+  try {
+    target = probe.location ? new URL(probe.location, 'http://placeholder.invalid') : undefined;
+  } catch {
+    target = undefined;
+  }
+  if (isRedirect && target?.protocol === 'https:') {
+    const permanent = probe.status === 301 || probe.status === 308;
+    return permanent
+      ? { ...base, status: 'pass', points: 10, message: `http:// answers ${probe.status} and redirects to HTTPS.` }
+      : { ...base, status: 'warn', points: 7, message: `http:// redirects to HTTPS, but with a temporary ${probe.status}.`, fix };
+  }
+  if (isRedirect) {
+    return { ...base, status: 'fail', points: 0, message: `http:// redirects to ${probe.location ?? 'nowhere'}, not to HTTPS.`, fix };
+  }
+  return { ...base, status: 'fail', points: 0, message: `http:// serves content directly (HTTP ${probe.status}), so first visits can be intercepted.`, fix };
+}
+
+const DAY = 86400000;
+
+/**
+ * @param {{ error?: string, protocol?: string | null, authorized?: boolean, authorizationError?: string | null,
+ *   validTo?: string, issuer?: string } | null} probe Result of a TLS handshake with the site.
+ * @returns {Finding}
+ */
+export function checkTls(probe, { isHttps = true, now = Date.now() } = {}) {
+  const base = { id: 'tls', title: 'TLS certificate and protocol', max: 15 };
+  if (!isHttps) {
+    return { ...base, status: 'fail', points: 0, message: 'Site is served over plain HTTP, traffic is not encrypted.', fix: 'Get a free certificate (for example from Let’s Encrypt) and serve the site over HTTPS.' };
+  }
+  if (!probe || probe.error) {
+    return { ...base, status: 'info', points: 0, max: 0, message: `Could not inspect TLS${probe?.error ? `: ${probe.error}` : ''}. Not counted in the score.` };
+  }
+  if (!probe.authorized) {
+    return { ...base, status: 'fail', points: 0, message: `Certificate is not trusted (${probe.authorizationError ?? 'unknown reason'}). Browsers will show a warning.`, fix: 'Install a valid certificate for this hostname, including the intermediate chain.' };
+  }
+  const problems = [];
+  let points = 15;
+  const daysLeft = Math.floor((Date.parse(probe.validTo ?? '') - now) / DAY);
+  if (Number.isFinite(daysLeft) && daysLeft < 14) {
+    problems.push(`certificate expires in ${daysLeft} day(s)`);
+    points -= 5;
+  }
+  if (probe.protocol && !['TLSv1.2', 'TLSv1.3'].includes(probe.protocol)) {
+    problems.push(`negotiated ${probe.protocol}, which is deprecated`);
+    points -= 10;
+  }
+  const summary = `${probe.protocol ?? 'TLS'}, certificate${probe.issuer ? ` from ${probe.issuer}` : ''} valid for ${daysLeft} more day(s)`;
+  if (problems.length === 0) {
+    return { ...base, status: 'pass', points, message: `${summary}.` };
+  }
+  return { ...base, status: 'warn', points: Math.max(points, 0), message: `${summary}, but ${problems.join('; ')}.`, fix: 'Renew the certificate automatically and allow only TLS 1.2 and 1.3.' };
+}
+
+/** Origin sent by the CORS probe. `.invalid` is reserved, so it can never be a real site. */
+export const PROBE_ORIGIN = 'https://shc-cors-check.invalid';
+
+/**
+ * @param {{ error?: string, allowOrigin?: string | null, allowCredentials?: string | null } | null} probe
+ *   CORS headers returned when the page is requested with `Origin: PROBE_ORIGIN`.
+ * @returns {Finding}
+ */
+export function checkCors(probe) {
+  const base = { id: 'cors', title: 'CORS (cross-origin access)', max: 10 };
+  if (!probe || probe.error) {
+    return { ...base, status: 'info', points: 0, max: 0, message: `Could not test CORS${probe?.error ? `: ${probe.error}` : ''}. Not counted in the score.` };
+  }
+  const origin = probe.allowOrigin?.trim();
+  const credentials = probe.allowCredentials?.trim().toLowerCase() === 'true';
+  const fix = 'Only return Access-Control-Allow-Origin for an explicit list of trusted origins.';
+  if (!origin) {
+    return { ...base, status: 'pass', points: 10, message: 'No Access-Control-Allow-Origin for an unknown origin, so other sites cannot read responses.' };
+  }
+  if (origin === PROBE_ORIGIN || origin === 'null') {
+    return credentials
+      ? { ...base, status: 'fail', points: 0, message: `Any origin is trusted (${origin === 'null' ? '"null"' : 'the request Origin is reflected'}) with credentials. Other sites could read users’ data while they are logged in.`, fix }
+      : { ...base, status: 'warn', points: 5, message: 'The request Origin is reflected back, so any site can read these responses.', fix };
+  }
+  if (origin === '*') {
+    return credentials
+      ? { ...base, status: 'warn', points: 5, message: 'Access-Control-Allow-Origin is * together with Allow-Credentials. Browsers reject this, which suggests a misconfiguration.', fix }
+      : { ...base, status: 'pass', points: 10, message: 'Access-Control-Allow-Origin is *, fine for public content that needs no login.' };
+  }
+  return { ...base, status: 'pass', points: 10, message: `Only ${origin} is allowed, not unknown origins.` };
+}
+
+/** Parse security.txt (RFC 9116) into lower-cased field -> values. */
+export function parseSecurityTxt(text) {
+  const fields = new Map();
+  for (const line of text.split(/\r?\n/)) {
+    const m = /^([A-Za-z-]+):\s*(.+)$/.exec(line.trim());
+    if (!m) continue;
+    const key = m[1].toLowerCase();
+    fields.set(key, [...(fields.get(key) ?? []), m[2].trim()]);
+  }
+  return fields;
+}
+
+/**
+ * Not scored: it is good practice, not a protection.
+ * @param {{ error?: string, status?: number, contentType?: string | null, body?: string } | null} probe
+ * @returns {Finding}
+ */
+export function checkSecurityTxt(probe, { now = Date.now() } = {}) {
+  const base = { id: 'security-txt', title: 'security.txt', max: 0, points: 0 };
+  const fix = 'Publish /.well-known/security.txt with Contact: and Expires: fields (see securitytxt.org).';
+  if (!probe || probe.error) {
+    return { ...base, status: 'info', message: `Could not fetch /.well-known/security.txt${probe?.error ? `: ${probe.error}` : ''}.` };
+  }
+  const isText = /^text\/plain/i.test(probe.contentType ?? '');
+  const fields = probe.status === 200 && isText ? parseSecurityTxt(probe.body ?? '') : new Map();
+  if (!fields.has('contact')) {
+    return { ...base, status: 'warn', message: 'No security.txt, so researchers have no clear way to report a vulnerability.', fix };
+  }
+  const expires = Date.parse(fields.get('expires')?.[0] ?? '');
+  if (!Number.isFinite(expires)) {
+    return { ...base, status: 'warn', message: 'security.txt has a Contact but no valid Expires field, which the standard requires.', fix };
+  }
+  if (expires < now) {
+    return { ...base, status: 'warn', message: 'security.txt has expired, so it should no longer be trusted.', fix: 'Update the Expires: date in security.txt.' };
+  }
+  return { ...base, status: 'pass', message: `Present. Contact: ${fields.get('contact')[0]}.` };
+}
+
+/** Run the checks that need extra requests. */
+export function analyzeSite(probes, { isHttps = true, now = Date.now() } = {}) {
+  return [
+    checkHttpsRedirect(probes.httpRedirect),
+    checkTls(probes.tls, { isHttps, now }),
+    checkCors(probes.cors),
+    checkSecurityTxt(probes.securityTxt, { now }),
+  ];
+}

@@ -17,12 +17,18 @@ export function formatReport(result, { color = false } = {}) {
     '',
   ].filter((l) => l !== null);
 
-  for (const f of result.findings) {
-    const icon = paint(ICONS[f.status], COLORS[f.status], color);
-    lines.push(`  ${icon} ${f.title.padEnd(32)} ${String(f.points).padStart(2)}/${f.max}`);
-    lines.push(`      ${f.message}`);
-    if (f.fix && f.status !== 'pass') lines.push(paint(`      fix: ${f.fix}`, 2, color));
+  const sections = [['Headers', result.findings], ['Site checks', result.siteFindings ?? []]];
+  for (const [heading, findings] of sections) {
+    if (findings.length === 0) continue;
+    lines.push(`  ${paint(heading, 1, color)}`);
+    for (const f of findings) {
+      const icon = paint(ICONS[f.status], COLORS[f.status], color);
+      const score = f.max === 0 ? 'not scored' : `${String(f.points).padStart(2)}/${f.max}`;
+      lines.push(`  ${icon} ${f.title.padEnd(32)} ${score}`);
+      lines.push(`      ${f.message}`);
+      if (f.fix && f.status !== 'pass') lines.push(paint(`      fix: ${f.fix}`, 2, color));
+    }
+    lines.push('');
   }
-  lines.push('');
   return lines.join('\n');
 }
